@@ -1,0 +1,26 @@
+[package]
+name = "utxo-selection-benchmark"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+entity = { git = "https://github.com/dcSpark/carp.git" }
+dcspark-core = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "08feb5a8b8b5a7b566fd41c0f7b1006a4ebb47a0" }
+utxo-selection = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "08feb5a8b8b5a7b566fd41c0f7b1006a4ebb47a0" }
+cardano-utils = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "08feb5a8b8b5a7b566fd41c0f7b1006a4ebb47a0" }
+
+anyhow = "1.0.53"
+itertools = "0.10.5"
+serde = {version = "1.0.144", features = ["derive", "rc"]}
+tokio = { version = "1.16.1", features = ["full"] }
+hex = "0.4.3"
+tracing-subscriber = "0.3.9"
+tracing = "0.1.31"
+serde_json = "1.0.79"
+serde_yaml = "0.9.13"
+clap = { version = "3.1", features = ["derive"] }
+cardano-multiplatform-lib = "3.1.1"
+pallas-addresses = "0.16.0"
+reqwest = { version = "0.11", features = ["json"] }

@@ -1,0 +1,19 @@
+db:
+  type: postgres
+  host: localhost
+  port: 5432
+  user: carp
+  password: carpdb
+  db: carp
+
+payment_creds_mapping: payment_credentials.mapping
+staking_creds_mapping: staking_credentials.mapping
+policy_mapping: policy_id.mapping
+asset_name_mapping: asset_name.mapping
+address_to_mapping: address_to_mappings.mapping
+
+unparsed_transactions: unparsed_transactions.txt
+banned_addresses: banned_addresses.txt
+
+events_output_path: raw_events.ev
+input_transactions_path: address_transactions.txt

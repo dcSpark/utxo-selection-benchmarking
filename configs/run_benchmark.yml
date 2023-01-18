@@ -1,0 +1,6 @@
+events_path: "cleaned_events_finalised.ev"
+output_insolvent: "bench_result/insolvent_addresses.txt"
+output_discarded: "bench_result/discarded_addresses.txt"
+output_balance: "bench_result/balances.txt"
+output_balance_short: "bench_result/short_stats.txt"
+utxos_path: "bench_result/final_utxos.txt"

@@ -1,0 +1,14 @@
+# global .gitignore
+*.swp
+
+# IDE
+.idea/
+.vscode/
+
+# Rust
+target/
+book/
+Cargo.lock
+
+# Mac files
+**/.DS_STore

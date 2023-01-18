@@ -1,0 +1,5 @@
+endpoint: https://cardano-mainnet.blockfrost.io
+key: <key>
+address: addr1w8pydstdswmdqmg2rdt59dzql3zgfp9pt8sulnjgalycwdsj9js7w
+txs_output_path: transactions_for_address.txt
+retries: 5
