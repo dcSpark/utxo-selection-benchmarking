@@ -657,6 +657,7 @@ fn add_new_selected_outputs_to_stake_keys(
                 value: output.value.clone(),
                 assets: output.assets.clone(),
                 metadata: Arc::new(Default::default()),
+                extra: None,
             });
         let current_token_balance = staking_key_balance_computed.entry(staking).or_default();
 
@@ -712,6 +713,7 @@ fn add_untouched_outputs_to_stake_keys(
                 value: output.value.clone(),
                 assets: assets.clone(),
                 metadata: Arc::new(Default::default()),
+                extra: None,
             });
         let current_token_balance = staking_key_balance_computed.entry(staking).or_default();
 

@@ -5,10 +5,12 @@ use anyhow::Context;
 use clap::Parser;
 use serde::Deserialize;
 
+use dcspark_core::network_id::NetworkInfo;
 use std::fs::File;
 
 use tracing_subscriber::prelude::*;
-use utxo_selection::algorithms::{ThermostatAlgoConfig, ThermostatFeeEstimator};
+use utxo_selection::algorithms::ThermostatAlgoConfig;
+use utxo_selection::estimators::ThermostatFeeEstimator;
 use utxo_selection_benchmark::bench::run_algorithm_benchmark;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,7 +72,7 @@ async fn _main() -> anyhow::Result<()> {
         change_balance_algo,
         || {
             Ok(ThermostatFeeEstimator::new(
-                cardano_utils::network_id::NetworkInfo::Mainnet,
+                NetworkInfo::Mainnet,
                 &serde_json::from_str(
                     "
                 {

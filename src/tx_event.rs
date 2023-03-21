@@ -38,7 +38,6 @@ pub fn pair_from_address(address: Address) -> Option<(u64, Option<u64>)> {
     }
     let split = address
         .split('_')
-        .into_iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
     let payment = match split
