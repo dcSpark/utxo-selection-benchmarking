@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use cardano_utils::multisig_plan::MultisigPlan;
+
 use clap::Parser;
 use serde::Deserialize;
 
@@ -71,10 +71,19 @@ async fn _main() -> anyhow::Result<()> {
         || {
             Ok(ThermostatFeeEstimator::new(
                 cardano_utils::network_id::NetworkInfo::Mainnet,
-                &MultisigPlan {
-                    quorum: 0,
-                    keys: vec![],
-                },
+                &serde_json::from_str(
+                    "
+                {
+                    quorum: 3,
+                    keys: [
+                        \"ecbb34d9e8f0356107036153babcb1e01b43d4ed5b849b15dfd8f6a5\",
+                        \"c7cb0f556a68766e672835108b5f43be9a193c9063866db6c50b5e25\",
+                        \"937d1f47dba39cb547287fd786db966ecd70489c6c35494018c69144\",
+                        \"721663acd63a5b3644e8c4e4ce7649457fd671922f448b497a4fd25d\",
+                        \"11a39984271cc3f0714f241e2e6df15e8abf2974f3772ffbeefb7a36\"
+                    ],
+                }",
+                )?,
             ))
         },
         config.events_path,

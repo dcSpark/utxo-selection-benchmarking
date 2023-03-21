@@ -436,11 +436,8 @@ fn print_utxos(
     for (stake_key, utxos) in address_computed_utxos_by_stake_key.iter() {
         for (payment_key, utxos) in utxos.iter() {
             file.write_all(
-                format!(
-                    "stake: {:?}, payment: {:?}, utxos: {:?}\n",
-                    stake_key, payment_key, utxos
-                )
-                .as_bytes(),
+                format!("stake: {stake_key:?}, payment: {payment_key:?}, utxos: {utxos:?}\n")
+                    .as_bytes(),
             )?;
         }
     }
@@ -450,7 +447,7 @@ fn print_utxos(
 fn print_hashmap(keys: HashSet<u64>, path: PathBuf) -> anyhow::Result<()> {
     let mut file = File::create(path)?;
     for key in keys.iter() {
-        file.write_all(format!("{:?}\n", key).as_bytes())?;
+        file.write_all(format!("{key:?}\n").as_bytes())?;
     }
     Ok(())
 }
@@ -481,7 +478,7 @@ fn print_computed_balance(
             balance
         } else {
             not_found_actual += 1;
-            output_balance.write_all(format!("no actual data: address: {:?}\n", key).as_bytes())?;
+            output_balance.write_all(format!("no actual data: address: {key:?}\n").as_bytes())?;
             continue;
         };
         let mut better_than_actual_element_wise = vec![];
@@ -491,11 +488,8 @@ fn print_computed_balance(
                 None => {
                     not_found_token_actual += 1;
                     output_balance.write_all(
-                        format!(
-                            "no token actual data: address: {:?}, token: {:?}\n",
-                            key, token
-                        )
-                        .as_bytes(),
+                        format!("no token actual data: address: {key:?}, token: {token:?}\n")
+                            .as_bytes(),
                     )?;
                     continue;
                 }
@@ -511,7 +505,7 @@ fn print_computed_balance(
             let print_value = match diff {
                 Balance::Debt(value) => {
                     better_than_actual_element_wise.push(1);
-                    format!("worse: -{}", value)
+                    format!("worse: -{value}")
                 }
                 Balance::Balanced => {
                     better_than_actual_element_wise.push(0);
@@ -519,7 +513,7 @@ fn print_computed_balance(
                 }
                 Balance::Excess(value) => {
                     better_than_actual_element_wise.push(-1);
-                    format!("better: {}", value)
+                    format!("better: {value}")
                 }
             };
             output_balance.write_all(
@@ -542,16 +536,16 @@ fn print_computed_balance(
     }
 
     output_balance_short
-        .write_all(format!("better than actual: {:?}\n", better_than_actual).as_bytes())?;
+        .write_all(format!("better than actual: {better_than_actual:?}\n").as_bytes())?;
     output_balance_short
-        .write_all(format!("not worse as actual: {:?}\n", not_worse_than_actual).as_bytes())?;
+        .write_all(format!("not worse as actual: {not_worse_than_actual:?}\n").as_bytes())?;
     output_balance_short
-        .write_all(format!("worse than actual: {:?}\n", worse_than_actual).as_bytes())?;
-    output_balance_short.write_all(format!("can't compare: {:?}\n", non_checkable).as_bytes())?;
+        .write_all(format!("worse than actual: {worse_than_actual:?}\n").as_bytes())?;
+    output_balance_short.write_all(format!("can't compare: {non_checkable:?}\n").as_bytes())?;
     output_balance_short
-        .write_all(format!("not found actual: {:?}\n", not_found_actual).as_bytes())?;
+        .write_all(format!("not found actual: {not_found_actual:?}\n").as_bytes())?;
     output_balance_short
-        .write_all(format!("not found token actual: {:?}\n", not_found_token_actual).as_bytes())?;
+        .write_all(format!("not found token actual: {not_found_token_actual:?}\n").as_bytes())?;
 
     Ok(())
 }

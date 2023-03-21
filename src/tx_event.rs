@@ -108,10 +108,10 @@ mod tests {
         for addr in addresses {
             let one = address_from_pair(addr);
             let two = pair_from_address(one).unwrap();
-            assert_eq!(addr.0, two.0, "{:?}", addr);
-            assert_eq!(addr.1.is_none(), two.1.is_none(), "{:?}", addr);
+            assert_eq!(addr.0, two.0, "{addr:?}");
+            assert_eq!(addr.1.is_none(), two.1.is_none(), "{addr:?}");
             if let Some(stake) = addr.1 {
-                assert_eq!(stake, two.1.unwrap(), "{:?}", addr);
+                assert_eq!(stake, two.1.unwrap(), "{addr:?}");
             }
         }
 
