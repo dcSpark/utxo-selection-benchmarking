@@ -90,7 +90,7 @@ impl SelectionEligibility {
 
     pub fn mark_key_as_insolvent(&mut self, staking_key: u64) {
         if self.staking_keys_of_interest.contains(&staking_key) {
-            panic!("staking key of interest is insolvent");
+            tracing::error!("staking key of interest is insolvent: {}", staking_key);
         }
         self.insolvent_staking_keys.insert(staking_key);
     }

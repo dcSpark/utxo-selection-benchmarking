@@ -4,9 +4,7 @@ use anyhow::{anyhow, Context};
 
 use clap::Parser;
 
-use cardano_multiplatform_lib::builders::tx_builder::{
-    TransactionBuilderConfigBuilder,
-};
+use cardano_multiplatform_lib::builders::tx_builder::TransactionBuilderConfigBuilder;
 use cardano_multiplatform_lib::builders::witness_builder::NativeScriptWitnessInfo;
 use cardano_multiplatform_lib::ledger::alonzo::fees::LinearFee;
 use cardano_multiplatform_lib::ledger::common::value::BigNum;
@@ -14,9 +12,7 @@ use cardano_multiplatform_lib::metadata::{
     AuxiliaryData, GeneralTransactionMetadata, TransactionMetadatum,
 };
 use cardano_multiplatform_lib::plutus::ExUnitPrices;
-use cardano_multiplatform_lib::{
-    UnitInterval,
-};
+use cardano_multiplatform_lib::UnitInterval;
 use dcspark_core::multisig_plan::MultisigPlan;
 use dcspark_core::network_id::NetworkInfo;
 use dcspark_core::tx::{CardanoPaymentCredentials, UTxOBuilder, UTxODetails};
