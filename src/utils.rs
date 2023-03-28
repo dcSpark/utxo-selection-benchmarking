@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context};
+use dcspark_core::{Balance, Regulated};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -6,6 +7,7 @@ use std::fs::File;
 use std::hash::Hash;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 pub fn dump_hashmap_to_file<Key: Eq + Hash + Serialize, Value: Serialize>(
     hashmap: &HashMap<Key, Value>,
@@ -109,4 +111,12 @@ pub fn read_hashset_from_file<Value: Eq + Hash + DeserializeOwned>(
         return Err(anyhow!("Data corrupted: lines count mismatch"));
     }
     Ok(result)
+}
+
+pub fn balance_to_i64(balance: Balance<Regulated>) -> i64 {
+    match balance {
+        Balance::Debt(value) => -i64::from_str(value.to_string().as_str()).unwrap(),
+        Balance::Balanced => 0,
+        Balance::Excess(value) => i64::from_str(value.to_string().as_str()).unwrap(),
+    }
 }

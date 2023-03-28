@@ -1,471 +1,525 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
 
-use crate::tx_event::{address_from_pair, pair_from_address, TxEvent, TxOutput};
+use crate::tx_event::{TxEvent, TxOutput};
 
-use dcspark_core::tx::{TransactionAsset, TransactionId, UTxOBuilder, UTxODetails, UtxoPointer};
-use dcspark_core::{Address, Balance, OutputIndex, Regulated, TokenId, Value};
-use itertools::Itertools;
+use dcspark_core::tx::{UTxOBuilder, UTxODetails};
+use dcspark_core::{Balance, Regulated, TokenId};
 
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use crate::bench_utils::address_mapper::CardanoDataMapper;
+use crate::bench_utils::balance_accumulator::BalanceAccumulator;
+use crate::bench_utils::balance_verification::verify_io_balance;
+use crate::bench_utils::change_extraction::extract_changes;
+use crate::bench_utils::output_utils::{builders_to_utxo_details, tx_outputs_to_utxo_builders};
+use crate::bench_utils::selection_eligibility::SelectionEligibility;
+use crate::bench_utils::utxo_accumulator::UTxOStoreAccumulator;
+use serde::Deserialize;
+
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::sync::Arc;
-use utxo_selection::{InputOutputSetup, InputSelectionAlgorithm, TransactionFeeEstimator};
+use std::rc::Rc;
+use std::str::FromStr;
 
-/* we don't take txs:
- * - with byron inputs
- * - with more than one staking key in inputs
- * - with no staking key in inputs
- */
-fn is_supported_for_selection(inputs: &[TxOutput]) -> Option<u64> {
-    if inputs.iter().any(|input| input.address.is_none())
-        || inputs.iter().map(|input| input.address).unique().count() != 1
-    {
-        return None;
-    }
-    return inputs
-        .first()
-        .and_then(|input| input.address.and_then(|(_payment, stake)| stake));
+use crate::bench_utils::stats_accumulator::{BalanceStats, StatsAccumulator};
+use crate::utils::balance_to_i64;
+use utxo_selection::{
+    InputOutputSetup, InputSelectionAlgorithm, TransactionFeeEstimator, UTxOStoreSupport,
+};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathsConfig {
+    events_path: PathBuf,
+
+    output_insolvent: PathBuf,
+    output_discarded: PathBuf,
+
+    output_balance: PathBuf,
+    output_balance_short: PathBuf,
+
+    #[serde(default)]
+    utxos_path: Option<PathBuf>,
+
+    #[serde(default)]
+    utxos_balance_path: Option<PathBuf>,
+
+    #[serde(default)]
+    balance_points_path: Option<PathBuf>,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_algorithm_benchmark<
     Estimator: TransactionFeeEstimator<InputUtxo = UTxODetails, OutputUtxo = UTxOBuilder>,
-    Algo: InputSelectionAlgorithm<InputUtxo = UTxODetails, OutputUtxo = UTxOBuilder>,
-    ChangeBalanceAlgo: InputSelectionAlgorithm<InputUtxo = UTxODetails, OutputUtxo = UTxOBuilder>,
+    Algo: InputSelectionAlgorithm<InputUtxo = UTxODetails, OutputUtxo = UTxOBuilder> + UTxOStoreSupport,
+    ChangeBalanceAlgo: InputSelectionAlgorithm<InputUtxo = UTxODetails, OutputUtxo = UTxOBuilder> + UTxOStoreSupport,
     EstimatorCreator,
+    DataMapper: CardanoDataMapper,
 >(
     mut algorithm: Algo,
     mut balance_change_algo: ChangeBalanceAlgo,
-    create_estimator: EstimatorCreator,
-    input_events: PathBuf,
-    output_insolvent: PathBuf,
-    output_discarded: PathBuf,
-    output_balance: PathBuf,
-    output_balance_short: PathBuf,
+    estimator_creator: EstimatorCreator,
+    mut data_mapper: DataMapper,
+    selection_eligibility_criteria: SelectionEligibility,
+    paths: PathsConfig,
     allow_balance_change: bool,
-    print_utxo_sets: Option<PathBuf>,
 ) -> anyhow::Result<()>
 where
     EstimatorCreator: Fn() -> anyhow::Result<Estimator>,
 {
-    let mut staking_key_balance_computed =
-        HashMap::<u64, HashMap<TokenId, Balance<Regulated>>>::new();
-    let mut staking_key_fee_computed = HashMap::<u64, Value<Regulated>>::new();
-    let mut staking_key_balance_actual =
-        HashMap::<u64, HashMap<TokenId, Balance<Regulated>>>::new();
-    let mut staking_key_fee_actual = HashMap::<u64, Value<Regulated>>::new();
+    let selection_eligibility_criteria = Rc::new(RefCell::new(selection_eligibility_criteria));
 
-    // staking key -> payment key -> utxos
-    let mut address_computed_utxos_by_stake_key =
-        HashMap::<u64, HashMap<u64, Vec<UTxODetails>>>::new();
+    let mut actual_balance_acc = BalanceAccumulator::new(selection_eligibility_criteria.clone());
+    let mut computed_balance_acc = BalanceAccumulator::new(selection_eligibility_criteria.clone());
 
-    let mut insolvent_staking_keys = HashSet::<u64>::new();
-    let mut discarded_staking_keys = HashSet::<u64>::new();
+    let mut utxo_accumulator = UTxOStoreAccumulator::new(selection_eligibility_criteria.clone());
 
-    let input_events = File::open(input_events)?;
-    let input_events = BufReader::new(input_events);
+    let input_events = BufReader::new(File::open(paths.events_path.clone())?);
+
+    let mut balance_points_acc = StatsAccumulator::<BalanceStats>::default();
+    let mut utxo_count_acc = StatsAccumulator::<u64>::default();
+    let mut read: u64 = 0;
 
     for (tx_number, event_str) in input_events.lines().enumerate() {
-        let event = event_str?;
-        let event: TxEvent = serde_json::from_str(&event)?;
+        read += 1;
+
+        for stake_key in selection_eligibility_criteria
+            .clone()
+            .as_ref()
+            .borrow()
+            .get_whitelisted_non_banned()
+            .iter()
+        {
+            collect_stats(
+                stake_key,
+                tx_number as u64,
+                &paths,
+                &actual_balance_acc,
+                &computed_balance_acc,
+                &utxo_accumulator,
+                &mut balance_points_acc,
+                &mut utxo_count_acc,
+            );
+        }
+
+        let event: TxEvent = serde_json::from_str(&event_str?)?;
         match event {
-            TxEvent::Full { to, fee, from } => {
-                let mut input_value = Value::zero();
-                let mut output_value = Value::zero();
-                for to in to.iter() {
-                    output_value += &to.value;
-                }
-                output_value += &fee;
-                for from in from.iter() {
-                    input_value += &from.value;
-                }
+            TxEvent::Full {
+                from: inputs,
+                fee,
+                to: outputs,
+            } => {
+                verify_io_balance(&inputs, &outputs, &fee).unwrap(); // if balance is not correct -> data is corrupted
 
-                let stake_key = is_supported_for_selection(&from);
-                if stake_key.is_none() || input_value != output_value {
-                    let stake_keys_to_discard: Vec<_> = from
-                        .iter()
-                        .filter_map(|input| input.address.and_then(|addr| addr.1))
-                        .collect();
-                    for key in stake_keys_to_discard.into_iter() {
-                        discarded_staking_keys.insert(key);
-                        address_computed_utxos_by_stake_key.remove(&key);
-                        staking_key_balance_computed.remove(&key);
-                        staking_key_balance_actual.remove(&key);
+                actual_balance_acc.reduce_balance_from(&inputs, &mut data_mapper)?;
+                actual_balance_acc.add_balance_from(&outputs, &mut data_mapper)?;
+
+                let should_perform_selection = selection_eligibility_criteria
+                    .clone()
+                    .borrow_mut()
+                    .should_perform_selection(&inputs);
+
+                let (pk, sk) = match should_perform_selection {
+                    None => {
+                        remove_inputs_from_consideration(
+                            inputs,
+                            &mut utxo_accumulator,
+                            &mut actual_balance_acc,
+                            &mut computed_balance_acc,
+                            selection_eligibility_criteria.clone(),
+                        );
+                        add_balances_from_partial_outputs(
+                            tx_number as u64,
+                            outputs,
+                            &mut utxo_accumulator,
+                            &mut computed_balance_acc,
+                            &mut data_mapper,
+                        )?;
+                        continue;
                     }
+                    Some(keys) => keys,
+                };
 
-                    // add balances
-                    handle_partial_parsed(
-                        tx_number,
-                        to,
-                        &mut address_computed_utxos_by_stake_key,
-                        &mut staking_key_balance_computed,
-                        &mut staking_key_balance_actual,
-                        &insolvent_staking_keys,
-                        &discarded_staking_keys,
-                    );
+                actual_balance_acc.add_fee_spending(sk, &fee);
 
-                    continue;
-                }
-                let stake_key = stake_key.unwrap();
-                if discarded_staking_keys.contains(&stake_key)
-                    || insolvent_staking_keys.contains(&stake_key)
-                {
-                    // add balances
-                    handle_partial_parsed(
-                        tx_number,
-                        to,
-                        &mut address_computed_utxos_by_stake_key,
-                        &mut staking_key_balance_computed,
-                        &mut staking_key_balance_actual,
-                        &insolvent_staking_keys,
-                        &discarded_staking_keys,
-                    );
+                let pk = pk.first().cloned().unwrap(); // pk must exist, since we've found sk
 
-                    continue;
-                }
                 // now we have inputs related to only one staking key. we're not insolvent and not discarded
 
-                let change_addresses = get_change_addresses(stake_key, &to);
-                let change_address_to_use =
-                    choose_change_address(stake_key, &from, &change_addresses);
+                let parsed_outputs = extract_changes(&outputs, (pk, sk));
+                let non_change_outputs =
+                    tx_outputs_to_utxo_builders(parsed_outputs.fixed_outputs, &mut data_mapper)?;
 
-                let change_address_to_use = address_from_pair(change_address_to_use);
+                let mut estimate = estimator_creator()?;
 
-                let mut fixed_outputs: Vec<_> = get_non_change_outputs(&to, &change_addresses);
-                if fixed_outputs.is_empty() {
-                    fixed_outputs = outputs_to_builders(to.clone());
-                }
-
-                let mut total_output_balance = dcspark_core::Value::zero();
-                let mut total_output_tokens = HashMap::<TokenId, TransactionAsset>::new();
-
-                let mut estimate = create_estimator()?;
-
-                for output in fixed_outputs.iter() {
+                for output in non_change_outputs.iter() {
                     estimate.add_output(output.clone())?;
-                    total_output_balance += &output.value;
-                    for asset in output.assets.iter() {
-                        match total_output_tokens.entry(asset.fingerprint.clone()) {
-                            Entry::Occupied(mut entry) => {
-                                entry.get_mut().quantity += &asset.quantity;
-                            }
-                            Entry::Vacant(entry) => {
-                                entry.insert(asset.clone());
-                            }
-                        }
-                    }
                 }
 
-                let computed_utxos = address_computed_utxos_by_stake_key.get(&stake_key);
-                let computed_utxos = match computed_utxos {
-                    None => {
-                        insolvent_staking_keys.insert(stake_key);
-                        tracing::debug!(
-                            "tx_number: {:?}, insolvent staking keys: {}",
-                            tx_number,
-                            insolvent_staking_keys.len()
-                        );
+                let available_inputs = utxo_accumulator.get_available_inputs(sk);
+                let initial_available_inputs_count = available_inputs.len();
 
-                        // add balances
-                        handle_partial_parsed(
-                            tx_number,
-                            to,
-                            &mut address_computed_utxos_by_stake_key,
-                            &mut staking_key_balance_computed,
-                            &mut staking_key_balance_actual,
-                            &insolvent_staking_keys,
-                            &discarded_staking_keys,
-                        );
-
-                        continue;
-                    }
-                    Some(utxos) => utxos
-                        .iter()
-                        .flat_map(|(_, utxos)| utxos.clone())
-                        .collect::<Vec<_>>(),
-                };
-
-                algorithm.set_available_inputs(computed_utxos)?;
-                let select_result = algorithm.select_inputs(
+                let change_address = data_mapper.map_address(Some((pk, Some(sk))))?;
+                algorithm.set_available_utxos(available_inputs)?;
+                let first_stage_select_result = algorithm.select_inputs(
                     &mut estimate,
-                    InputOutputSetup {
-                        input_balance: Default::default(),
-                        input_asset_balance: Default::default(),
-                        output_balance: total_output_balance,
-                        output_asset_balance: total_output_tokens,
-                        fixed_inputs: vec![],
-                        fixed_outputs: fixed_outputs.clone(),
-                        change_address: Some(change_address_to_use.clone()),
-                    },
+                    InputOutputSetup::<UTxODetails, UTxOBuilder>::from_fixed_inputs_and_outputs(
+                        vec![],
+                        non_change_outputs.clone(),
+                        Some(change_address.clone()),
+                    ),
                 );
 
-                let select_result = match select_result {
+                let mut first_stage_select_result = match first_stage_select_result {
                     Ok(r) => r,
                     Err(err) => {
-                        let computed_balance = staking_key_balance_computed
-                            .get(&stake_key)
-                            .and_then(|map| map.get(&TokenId::MAIN));
-                        let actual_balance = staking_key_balance_actual
-                            .get(&stake_key)
-                            .and_then(|map| map.get(&TokenId::MAIN));
-                        let tried_to_send = fixed_outputs;
-                        tracing::debug!(
-                            "Can't select inputs for {} address using provided algo, actual: {:?}, computed: {:?}, outputs: {:?}, tx_number: {}, err: {:?}",
-                            stake_key, actual_balance, computed_balance, tried_to_send, tx_number, err
-                        );
-                        insolvent_staking_keys.insert(stake_key);
-
-                        // add balances
-                        handle_partial_parsed(
+                        tracing::error!(
+                            "initial selection didn't converge: {}, tx_number: {}, sk: {}",
+                            err,
                             tx_number,
-                            to,
-                            &mut address_computed_utxos_by_stake_key,
-                            &mut staking_key_balance_computed,
-                            &mut staking_key_balance_actual,
-                            &insolvent_staking_keys,
-                            &discarded_staking_keys,
+                            sk
                         );
-
+                        selection_eligibility_criteria
+                            .clone()
+                            .borrow_mut()
+                            .mark_key_as_insolvent(sk);
+                        remove_inputs_from_consideration(
+                            inputs,
+                            &mut utxo_accumulator,
+                            &mut actual_balance_acc,
+                            &mut computed_balance_acc,
+                            selection_eligibility_criteria.clone(),
+                        );
+                        add_balances_from_partial_outputs(
+                            tx_number as u64,
+                            outputs,
+                            &mut utxo_accumulator,
+                            &mut computed_balance_acc,
+                            &mut data_mapper,
+                        )?;
                         continue;
                     }
                 };
 
-                let computed_available_utxos = algorithm.available_inputs();
-                let mut changes = select_result.changes.clone();
-                let mut selected_inputs = select_result.chosen_inputs.clone();
-                let mut fee_computed = select_result.fee.clone();
+                let mut available_inputs = algorithm.get_available_utxos()?;
 
-                if !select_result.is_balanced() && allow_balance_change {
-                    balance_change_algo.set_available_inputs(computed_available_utxos.clone())?;
+                let initial_fixed_outputs = first_stage_select_result.fixed_outputs.clone();
+
+                let mut selected_changes = first_stage_select_result.changes.clone();
+                let mut selected_inputs = first_stage_select_result.chosen_inputs.clone();
+                let mut fee_computed = first_stage_select_result.fee.clone();
+
+                assert_eq!(
+                    selected_inputs.len() + available_inputs.len(),
+                    initial_available_inputs_count
+                );
+
+                if !first_stage_select_result.are_utxos_balanced() && allow_balance_change {
+                    balance_change_algo.set_available_utxos(available_inputs.clone())?;
 
                     // now all selected inputs are chosen ones
-                    let mut fixed_inputs = select_result.fixed_inputs.clone();
-                    fixed_inputs.append(&mut select_result.chosen_inputs.clone());
+                    let mut fixed_inputs = first_stage_select_result.fixed_inputs;
+                    fixed_inputs.append(&mut first_stage_select_result.chosen_inputs);
 
                     // outputs as well
-                    let mut fixed_outputs = select_result.fixed_outputs.clone();
-                    fixed_outputs.append(&mut changes.clone());
+                    let mut fixed_outputs = first_stage_select_result.fixed_outputs;
+                    fixed_outputs.append(&mut first_stage_select_result.changes);
 
-                    let balance_change_result = balance_change_algo.select_inputs(
+                    let second_stage_select_result = balance_change_algo.select_inputs(
                         &mut estimate,
-                        InputOutputSetup {
-                            input_balance: select_result.input_balance,
-                            input_asset_balance: select_result.input_asset_balance,
-                            output_balance: select_result.output_balance,
-                            output_asset_balance: select_result.output_asset_balance,
+                        InputOutputSetup::from_fixed_inputs_and_outputs(
                             fixed_inputs,
                             fixed_outputs,
-                            change_address: Some(change_address_to_use.clone()),
-                        },
+                            Some(change_address.clone()),
+                        ),
                     );
 
-                    let mut balance_change_result = match balance_change_result {
-                        Ok(r) => r,
-                        Err(err) => {
-                            tracing::debug!(
-                                "Can't balance inputs for that address using provided algo {:?}, tx_number: {:?}",
-                                err, tx_number
+                    let mut second_stage_select_result = match second_stage_select_result {
+                        Ok(r) if r.are_utxos_balanced() => r,
+                        _ => {
+                            if let Err(err) = second_stage_select_result {
+                                tracing::error!("balance change selection didn't converge: {}, tx_number: {}, sk: {}", err, tx_number, sk);
+                            } else {
+                                tracing::error!("balance change selection didn't converge: utxos are not balanced, tx_number: {}, sk: {}", tx_number, sk);
+                            }
+                            selection_eligibility_criteria
+                                .clone()
+                                .borrow_mut()
+                                .mark_key_as_insolvent(sk);
+                            remove_inputs_from_consideration(
+                                inputs,
+                                &mut utxo_accumulator,
+                                &mut actual_balance_acc,
+                                &mut computed_balance_acc,
+                                selection_eligibility_criteria.clone(),
                             );
-                            insolvent_staking_keys.insert(stake_key);
-
-                            // add balances
-                            handle_partial_parsed(
-                                tx_number,
-                                to,
-                                &mut address_computed_utxos_by_stake_key,
-                                &mut staking_key_balance_computed,
-                                &mut staking_key_balance_actual,
-                                &insolvent_staking_keys,
-                                &discarded_staking_keys,
-                            );
-
+                            add_balances_from_partial_outputs(
+                                tx_number as u64,
+                                outputs,
+                                &mut utxo_accumulator,
+                                &mut computed_balance_acc,
+                                &mut data_mapper,
+                            )?;
                             continue;
                         }
                     };
 
-                    if !balance_change_result.is_balanced() {
-                        tracing::debug!("Can't balance inputs for that address using provided algo event after running balance, tx_number: {:?}", tx_number);
-                        insolvent_staking_keys.insert(stake_key);
-
-                        // add balances
-                        handle_partial_parsed(
-                            tx_number,
-                            to,
-                            &mut address_computed_utxos_by_stake_key,
-                            &mut staking_key_balance_computed,
-                            &mut staking_key_balance_actual,
-                            &insolvent_staking_keys,
-                            &discarded_staking_keys,
-                        );
-
-                        continue;
-                    }
-
                     // changes from first stage + changes from balance + original fixed outputs = all outputs
-                    changes.append(&mut balance_change_result.changes);
-                    selected_inputs.append(&mut balance_change_result.chosen_inputs);
-                    fee_computed = balance_change_result.fee;
-                } else if !select_result.is_balanced() {
-                    tracing::debug!("Can't balance inputs for that address using provided algo, tx_number: {:?}", tx_number);
-                    insolvent_staking_keys.insert(stake_key);
+                    available_inputs = balance_change_algo.get_available_utxos()?;
 
-                    // add balances
-                    handle_partial_parsed(
-                        tx_number,
-                        to,
-                        &mut address_computed_utxos_by_stake_key,
-                        &mut staking_key_balance_computed,
-                        &mut staking_key_balance_actual,
-                        &insolvent_staking_keys,
-                        &discarded_staking_keys,
+                    selected_changes.append(&mut second_stage_select_result.changes);
+                    selected_inputs.append(&mut second_stage_select_result.chosen_inputs);
+
+                    fee_computed = second_stage_select_result.fee;
+                } else if !first_stage_select_result.are_utxos_balanced() {
+                    tracing::error!("initial selection didn't converge and balance change is switched off, tx_number: {}, sk: {}", tx_number, sk);
+                    tracing::error!(
+                        "input balance: {:?}, output balance: {:?}, fee: {:?}",
+                        first_stage_select_result.input_balance,
+                        first_stage_select_result.output_balance,
+                        first_stage_select_result.fee
                     );
-
+                    tracing::error!("selected inputs:");
+                    for output in first_stage_select_result.chosen_inputs.iter() {
+                        tracing::error!("selected: {:?}", output);
+                    }
+                    tracing::error!("fixed outputs:");
+                    for output in first_stage_select_result.fixed_outputs.iter() {
+                        tracing::error!("output: {:?}", output);
+                    }
+                    tracing::error!("change outputs:");
+                    for output in first_stage_select_result.changes.iter() {
+                        tracing::error!("change: {:?}", output);
+                    }
+                    selection_eligibility_criteria
+                        .clone()
+                        .borrow_mut()
+                        .mark_key_as_insolvent(sk);
+                    remove_inputs_from_consideration(
+                        inputs,
+                        &mut utxo_accumulator,
+                        &mut actual_balance_acc,
+                        &mut computed_balance_acc,
+                        selection_eligibility_criteria.clone(),
+                    );
+                    add_balances_from_partial_outputs(
+                        tx_number as u64,
+                        outputs,
+                        &mut utxo_accumulator,
+                        &mut computed_balance_acc,
+                        &mut data_mapper,
+                    )?;
                     continue;
                 }
 
-                let mut inputs_value = dcspark_core::Value::<Regulated>::zero();
-                for change in select_result.changes.iter() {
-                    inputs_value += &change.value;
-                }
-                for change in select_result.fixed_outputs.iter() {
-                    inputs_value += &change.value;
-                }
-                inputs_value += &fee_computed;
-                for change in select_result.fixed_inputs.iter() {
-                    inputs_value -= &change.value;
-                }
-                for change in select_result.chosen_inputs.iter() {
-                    inputs_value -= &change.value;
-                }
-                assert_eq!(inputs_value, Value::zero());
-
-                recount_available_inputs(
-                    selected_inputs,
-                    stake_key,
-                    &mut address_computed_utxos_by_stake_key,
-                    &mut staking_key_balance_computed,
+                assert_eq!(
+                    available_inputs.len() + selected_inputs.len(),
+                    initial_available_inputs_count
                 );
 
-                let outputs: Vec<_> = fixed_outputs
-                    .into_iter()
-                    .chain(changes.into_iter())
-                    .collect();
-                add_new_selected_outputs_to_stake_keys(
-                    tx_number,
-                    outputs,
-                    &mut address_computed_utxos_by_stake_key,
-                    &mut staking_key_balance_computed,
-                    &insolvent_staking_keys,
-                    &discarded_staking_keys,
-                );
+                utxo_accumulator.set_available_inputs(sk, available_inputs);
+                utxo_accumulator.add_from_outputs(
+                    builders_to_utxo_details(
+                        tx_number as u64,
+                        initial_fixed_outputs
+                            .iter()
+                            .cloned()
+                            .chain(selected_changes.iter().cloned())
+                            .collect(),
+                    )?,
+                    &mut data_mapper,
+                )?;
 
-                add_to_actual_balance(
-                    &to,
-                    &mut staking_key_balance_actual,
-                    &insolvent_staking_keys,
-                    &discarded_staking_keys,
-                );
+                computed_balance_acc
+                    .reduce_balance_from_utxos(&selected_inputs, &mut data_mapper)?;
+                computed_balance_acc.add_balance_from_builders(
+                    &initial_fixed_outputs
+                        .iter()
+                        .cloned()
+                        .chain(selected_changes.iter().cloned())
+                        .collect::<Vec<_>>(),
+                    &mut data_mapper,
+                )?;
 
-                subtract_from_actual_balance(stake_key, &from, &mut staking_key_balance_actual);
-
-                *staking_key_fee_actual.entry(stake_key).or_default() += &fee;
-                *staking_key_fee_computed.entry(stake_key).or_default() += &fee_computed;
+                computed_balance_acc.add_fee_spending(sk, &fee_computed);
             }
             TxEvent::Partial { to } => {
-                handle_partial_parsed(
-                    tx_number,
+                actual_balance_acc.add_balance_from(&to, &mut data_mapper)?;
+                add_balances_from_partial_outputs(
+                    tx_number as u64,
                     to,
-                    &mut address_computed_utxos_by_stake_key,
-                    &mut staking_key_balance_computed,
-                    &mut staking_key_balance_actual,
-                    &insolvent_staking_keys,
-                    &discarded_staking_keys,
-                );
+                    &mut utxo_accumulator,
+                    &mut computed_balance_acc,
+                    &mut data_mapper,
+                )?;
             }
         }
 
-        if tx_number % 10000 == 0 {
+        if tx_number % 1000 == 0 {
             tracing::info!("Processed line {:?}", tx_number);
         }
     }
 
-    for addr in insolvent_staking_keys.iter() {
-        staking_key_balance_computed.remove(addr);
-        staking_key_balance_actual.remove(addr);
-        address_computed_utxos_by_stake_key.remove(addr);
+    for stake_key in selection_eligibility_criteria
+        .as_ref()
+        .borrow()
+        .get_whitelisted_non_banned()
+        .iter()
+    {
+        collect_stats(
+            stake_key,
+            read,
+            &paths,
+            &actual_balance_acc,
+            &computed_balance_acc,
+            &utxo_accumulator,
+            &mut balance_points_acc,
+            &mut utxo_count_acc,
+        );
     }
 
     tracing::info!(
         "Total converged addresses: {:?}",
-        staking_key_balance_computed.len()
+        computed_balance_acc.len()
     );
     tracing::info!(
         "Total insolvent addresses: {:?}",
-        insolvent_staking_keys.len()
+        selection_eligibility_criteria
+            .as_ref()
+            .borrow()
+            .total_insolvent_addresses()
     );
     tracing::info!(
-        "Total discarded addresses: {:?}",
-        discarded_staking_keys.len()
+        "Total banned addresses: {:?}",
+        selection_eligibility_criteria
+            .as_ref()
+            .borrow()
+            .total_banned_addresses()
     );
 
-    print_hashmap(discarded_staking_keys, output_discarded)?;
-    print_hashmap(insolvent_staking_keys, output_insolvent)?;
-    print_computed_balance(
-        staking_key_balance_computed,
-        staking_key_balance_actual,
-        staking_key_fee_actual,
-        staking_key_fee_computed,
-        output_balance,
-        output_balance_short,
+    selection_eligibility_criteria
+        .borrow_mut()
+        .print_banned(paths.output_discarded)?;
+    selection_eligibility_criteria
+        .borrow_mut()
+        .print_insolvent(paths.output_insolvent)?;
+
+    print_balances(
+        actual_balance_acc,
+        computed_balance_acc,
+        paths.output_balance,
+        paths.output_balance_short,
     )?;
 
-    if let Some(path) = print_utxo_sets {
-        print_utxos(address_computed_utxos_by_stake_key, path)?;
+    if let Some(path) = paths.utxos_path {
+        utxo_accumulator.print_utxos(path)?;
+    }
+
+    if let Some(path) = paths.balance_points_path {
+        balance_points_acc.dump_stats(
+            path,
+            "ada_computed,ada_actual,fee_computed,fee_actual".to_string(),
+        )?;
+    }
+
+    if let Some(path) = paths.utxos_balance_path {
+        utxo_count_acc.dump_stats(path, "utxo_count".to_string())?;
     }
 
     Ok(())
 }
 
-fn print_utxos(
-    address_computed_utxos_by_stake_key: HashMap<u64, HashMap<u64, Vec<UTxODetails>>>,
-    path: PathBuf,
-) -> anyhow::Result<()> {
-    let mut file = File::create(path)?;
-    for (stake_key, utxos) in address_computed_utxos_by_stake_key.iter() {
-        for (payment_key, utxos) in utxos.iter() {
-            file.write_all(
-                format!(
-                    "stake: {:?}, payment: {:?}, utxos: {:?}\n",
-                    stake_key, payment_key, utxos
+#[allow(clippy::too_many_arguments)]
+fn collect_stats(
+    stake_key: &u64,
+    tx_number: u64,
+    paths: &PathsConfig,
+    actual_balance_acc: &BalanceAccumulator,
+    computed_balance_acc: &BalanceAccumulator,
+    utxo_accumulator: &UTxOStoreAccumulator,
+    balance_points_acc: &mut StatsAccumulator<BalanceStats>,
+    utxo_count_acc: &mut StatsAccumulator<u64>,
+) {
+    if paths.balance_points_path.is_some() {
+        balance_points_acc.add_stats(
+            *stake_key,
+            tx_number,
+            BalanceStats {
+                ada_computed: balance_to_i64(
+                    computed_balance_acc.get_balance(*stake_key, TokenId::MAIN),
+                ),
+                ada_actual: balance_to_i64(
+                    actual_balance_acc.get_balance(*stake_key, TokenId::MAIN),
+                ),
+                fee_computed: i64::from_str(
+                    computed_balance_acc
+                        .get_fee(*stake_key)
+                        .to_string()
+                        .as_str(),
                 )
-                .as_bytes(),
-            )?;
+                .unwrap(),
+                fee_actual: i64::from_str(
+                    actual_balance_acc.get_fee(*stake_key).to_string().as_str(),
+                )
+                .unwrap(),
+            },
+        );
+    }
+    if paths.utxos_balance_path.is_some() {
+        utxo_count_acc.add_stats(
+            *stake_key,
+            tx_number,
+            utxo_accumulator.get_available_inputs(*stake_key).len() as u64,
+        );
+    }
+}
+
+fn remove_inputs_from_consideration(
+    inputs: Vec<TxOutput>,
+    utxo_accumulator: &mut UTxOStoreAccumulator,
+    actual_balance_acc: &mut BalanceAccumulator,
+    computed_balance_acc: &mut BalanceAccumulator,
+    selection_eligibility_criteria: Rc<RefCell<SelectionEligibility>>,
+) {
+    for input in inputs.into_iter() {
+        if let Some((_, Some(sk))) = input.address {
+            utxo_accumulator.remove_stake_key(sk);
+            actual_balance_acc.remove_stake_key(sk);
+            computed_balance_acc.remove_stake_key(sk);
+            selection_eligibility_criteria
+                .clone()
+                .borrow_mut()
+                .mark_key_as_insolvent(sk);
         }
     }
+}
+
+fn add_balances_from_partial_outputs<DataMapper: CardanoDataMapper>(
+    tx_number: u64,
+    outputs: Vec<TxOutput>,
+    utxo_accumulator: &mut UTxOStoreAccumulator,
+    computed_balance_acc: &mut BalanceAccumulator,
+    data_mapper: &mut DataMapper,
+) -> anyhow::Result<()> {
+    computed_balance_acc.add_balance_from(&outputs, data_mapper)?;
+    let builders = tx_outputs_to_utxo_builders(outputs, data_mapper)?;
+    let outputs = builders_to_utxo_details(tx_number, builders)?;
+    utxo_accumulator.add_from_outputs(outputs, data_mapper)?;
     Ok(())
 }
 
-fn print_hashmap(keys: HashSet<u64>, path: PathBuf) -> anyhow::Result<()> {
-    let mut file = File::create(path)?;
-    for key in keys.iter() {
-        file.write_all(format!("{:?}\n", key).as_bytes())?;
-    }
-    Ok(())
-}
-
-fn print_computed_balance(
-    staking_key_balance_computed: HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-    staking_key_balance_actual: HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-    staking_key_fee_actual: HashMap<u64, Value<Regulated>>,
-    staking_key_fee_computed: HashMap<u64, Value<Regulated>>,
+fn print_balances(
+    actual_balance_acc: BalanceAccumulator,
+    computed_balance_acc: BalanceAccumulator,
     output_balance: PathBuf,
     output_balance_short: PathBuf,
 ) -> anyhow::Result<()> {
     let mut output_balance = File::create(output_balance)?;
     let mut output_balance_short = File::create(output_balance_short)?;
-    let keys = staking_key_balance_computed.iter();
+
+    let (computed_balances, computed_fee) = computed_balance_acc.to_balances_and_fee();
+    let (actual_balances, actual_fee) = actual_balance_acc.to_balances_and_fee();
+
+    let keys = computed_balances.iter();
 
     let mut better_than_actual: u64 = 0;
     let mut not_worse_than_actual: u64 = 0;
@@ -477,11 +531,11 @@ fn print_computed_balance(
     let mut not_found_token_actual: u64 = 0;
 
     for (key, computed) in keys {
-        let actual = if let Some(balance) = staking_key_balance_actual.get(key) {
+        let actual = if let Some(balance) = actual_balances.get(key) {
             balance
         } else {
             not_found_actual += 1;
-            output_balance.write_all(format!("no actual data: address: {:?}\n", key).as_bytes())?;
+            output_balance.write_all(format!("no actual data: address: {key:?}\n").as_bytes())?;
             continue;
         };
         let mut better_than_actual_element_wise = vec![];
@@ -491,11 +545,8 @@ fn print_computed_balance(
                 None => {
                     not_found_token_actual += 1;
                     output_balance.write_all(
-                        format!(
-                            "no token actual data: address: {:?}, token: {:?}\n",
-                            key, token
-                        )
-                        .as_bytes(),
+                        format!("no token actual data: address: {key:?}, token: {token:?}\n")
+                            .as_bytes(),
                     )?;
                     continue;
                 }
@@ -511,7 +562,7 @@ fn print_computed_balance(
             let print_value = match diff {
                 Balance::Debt(value) => {
                     better_than_actual_element_wise.push(1);
-                    format!("worse: -{}", value)
+                    format!("worse: -{value}")
                 }
                 Balance::Balanced => {
                     better_than_actual_element_wise.push(0);
@@ -519,13 +570,13 @@ fn print_computed_balance(
                 }
                 Balance::Excess(value) => {
                     better_than_actual_element_wise.push(-1);
-                    format!("better: {}", value)
+                    format!("better: {value}")
                 }
             };
             output_balance.write_all(
                 format!(
                     "diff: address: {:?}, token: {:?}, diff: {:?}, actual: {:?}, computed: {:?}, fee actual: {:?}, fee computed: {:?}\n",
-                    key, token, print_value, actual_token_balance, computed_token_balance, staking_key_fee_actual.get(key), staking_key_fee_computed.get(key),
+                    key, token, print_value, actual_token_balance, computed_token_balance, actual_fee.get(key), computed_fee.get(key),
                 )
                 .as_bytes(),
             )?;
@@ -542,283 +593,16 @@ fn print_computed_balance(
     }
 
     output_balance_short
-        .write_all(format!("better than actual: {:?}\n", better_than_actual).as_bytes())?;
+        .write_all(format!("better than actual: {better_than_actual:?}\n").as_bytes())?;
     output_balance_short
-        .write_all(format!("not worse as actual: {:?}\n", not_worse_than_actual).as_bytes())?;
+        .write_all(format!("not worse as actual: {not_worse_than_actual:?}\n").as_bytes())?;
     output_balance_short
-        .write_all(format!("worse than actual: {:?}\n", worse_than_actual).as_bytes())?;
-    output_balance_short.write_all(format!("can't compare: {:?}\n", non_checkable).as_bytes())?;
+        .write_all(format!("worse than actual: {worse_than_actual:?}\n").as_bytes())?;
+    output_balance_short.write_all(format!("can't compare: {non_checkable:?}\n").as_bytes())?;
     output_balance_short
-        .write_all(format!("not found actual: {:?}\n", not_found_actual).as_bytes())?;
+        .write_all(format!("not found actual: {not_found_actual:?}\n").as_bytes())?;
     output_balance_short
-        .write_all(format!("not found token actual: {:?}\n", not_found_token_actual).as_bytes())?;
+        .write_all(format!("not found token actual: {not_found_token_actual:?}\n").as_bytes())?;
 
     Ok(())
-}
-
-fn handle_partial_parsed(
-    tx_number: usize,
-    to: Vec<TxOutput>,
-    address_computed_utxos_by_stake_key: &mut HashMap<u64, HashMap<u64, Vec<UTxODetails>>>,
-    staking_key_balance_computed: &mut HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-    staking_key_balance_actual: &mut HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-    insolvent_staking_keys: &HashSet<u64>,
-    discarded_staking_keys: &HashSet<u64>,
-) {
-    add_to_actual_balance(
-        &to,
-        staking_key_balance_actual,
-        insolvent_staking_keys,
-        discarded_staking_keys,
-    );
-    add_untouched_outputs_to_stake_keys(
-        tx_number,
-        to,
-        address_computed_utxos_by_stake_key,
-        staking_key_balance_computed,
-        insolvent_staking_keys,
-        discarded_staking_keys,
-    );
-}
-
-fn add_to_actual_balance(
-    to: &[TxOutput],
-    staking_key_balance_actual: &mut HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-    insolvent_keys: &HashSet<u64>,
-    discarded_keys: &HashSet<u64>,
-) {
-    for output in to.iter() {
-        let (_, staking) = match output.address {
-            Some(addr) => addr,
-            None => continue,
-        };
-        let staking = match staking {
-            None => continue,
-            Some(staking) => staking,
-        };
-
-        if insolvent_keys.contains(&staking) || discarded_keys.contains(&staking) {
-            continue;
-        }
-
-        let balance = staking_key_balance_actual.entry(staking).or_default();
-        *balance.entry(TokenId::MAIN).or_default() += &output.value;
-        for token in output.assets.iter() {
-            let asset = TransactionAsset::from(token.clone());
-            *balance.entry(asset.fingerprint.clone()).or_default() += &asset.quantity;
-        }
-    }
-}
-
-fn subtract_from_actual_balance(
-    staking_key: u64,
-    from: &[TxOutput],
-    staking_key_balance_actual: &mut HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-) {
-    let balance = staking_key_balance_actual.entry(staking_key).or_default();
-
-    for from in from.iter() {
-        *balance.entry(TokenId::MAIN).or_default() -= &from.value;
-        for token in from.assets.iter() {
-            let asset = TransactionAsset::from(token.clone());
-            *balance.entry(asset.fingerprint.clone()).or_default() -= &asset.quantity;
-        }
-    }
-}
-
-fn add_new_selected_outputs_to_stake_keys(
-    tx_number: usize,
-    outputs: Vec<UTxOBuilder>,
-    address_computed_utxos_by_stake_key: &mut HashMap<u64, HashMap<u64, Vec<UTxODetails>>>,
-    staking_key_balance_computed: &mut HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-    insolvent_keys: &HashSet<u64>,
-    discarded_keys: &HashSet<u64>,
-) {
-    for (output_index, output) in outputs.iter().enumerate() {
-        let (payment, staking) = match pair_from_address(output.address.clone()) {
-            None => continue,
-            Some(address) => address,
-        };
-        let staking = match staking {
-            None => continue,
-            Some(staking) => staking,
-        };
-
-        if insolvent_keys.contains(&staking) || discarded_keys.contains(&staking) {
-            continue;
-        }
-
-        let current_stake_key_utxos = address_computed_utxos_by_stake_key
-            .entry(staking)
-            .or_default();
-        current_stake_key_utxos
-            .entry(payment)
-            .or_default()
-            .push(UTxODetails {
-                pointer: UtxoPointer {
-                    transaction_id: TransactionId::new(tx_number.to_string()),
-                    output_index: OutputIndex::new(output_index as u64),
-                },
-                address: output.address.clone(),
-                value: output.value.clone(),
-                assets: output.assets.clone(),
-                metadata: Arc::new(Default::default()),
-            });
-        let current_token_balance = staking_key_balance_computed.entry(staking).or_default();
-
-        *current_token_balance.entry(TokenId::MAIN).or_default() += &output.value;
-        for token in output.assets.iter() {
-            *current_token_balance
-                .entry(token.fingerprint.clone())
-                .or_default() += &token.quantity;
-        }
-    }
-}
-
-fn add_untouched_outputs_to_stake_keys(
-    tx_number: usize,
-    outputs: Vec<TxOutput>,
-    address_computed_utxos_by_stake_key: &mut HashMap<u64, HashMap<u64, Vec<UTxODetails>>>,
-    staking_key_balance_computed: &mut HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-    insolvent_keys: &HashSet<u64>,
-    discarded_keys: &HashSet<u64>,
-) {
-    for (output_index, output) in outputs.iter().enumerate() {
-        let (payment, staking) = match output.address {
-            None => continue,
-            Some(address) => address,
-        };
-
-        let staking = match staking {
-            None => continue,
-            Some(staking) => staking,
-        };
-
-        if insolvent_keys.contains(&staking) || discarded_keys.contains(&staking) {
-            continue;
-        }
-        let assets: Vec<TransactionAsset> = output
-            .assets
-            .iter()
-            .map(|asset| TransactionAsset::from(asset.clone()))
-            .collect();
-
-        let current_stake_key_utxos = address_computed_utxos_by_stake_key
-            .entry(staking)
-            .or_default();
-        current_stake_key_utxos
-            .entry(payment)
-            .or_default()
-            .push(UTxODetails {
-                pointer: UtxoPointer {
-                    transaction_id: TransactionId::new(tx_number.to_string()),
-                    output_index: OutputIndex::new(output_index as u64),
-                },
-                address: address_from_pair((payment, Some(staking))),
-                value: output.value.clone(),
-                assets: assets.clone(),
-                metadata: Arc::new(Default::default()),
-            });
-        let current_token_balance = staking_key_balance_computed.entry(staking).or_default();
-
-        *current_token_balance.entry(TokenId::MAIN).or_default() += &output.value;
-        for token in assets.into_iter() {
-            *current_token_balance
-                .entry(token.fingerprint.clone())
-                .or_default() += &token.quantity;
-        }
-    }
-}
-
-fn recount_available_inputs(
-    chosen_inputs: Vec<UTxODetails>,
-    stake_key: u64,
-    address_computed_utxos_by_stake_key: &mut HashMap<u64, HashMap<u64, Vec<UTxODetails>>>,
-    staking_key_balance_computed: &mut HashMap<u64, HashMap<TokenId, Balance<Regulated>>>,
-) {
-    let current_stake_key_utxos = address_computed_utxos_by_stake_key
-        .entry(stake_key)
-        .or_default();
-    let current_token_balance = staking_key_balance_computed.entry(stake_key).or_default();
-
-    for chosen_input in chosen_inputs.into_iter() {
-        let (payment, staking) = pair_from_address(chosen_input.address.clone()).unwrap();
-        if staking.is_none() || staking.unwrap() != stake_key {
-            continue;
-        }
-        *current_token_balance.entry(TokenId::MAIN).or_default() -= &chosen_input.value;
-        for token in chosen_input.assets.iter() {
-            *current_token_balance
-                .entry(token.fingerprint.clone())
-                .or_default() -= &token.quantity;
-        }
-
-        current_stake_key_utxos
-            .entry(payment)
-            .or_default()
-            .retain_mut(|elem| elem.pointer != chosen_input.pointer);
-    }
-}
-
-fn get_change_addresses(stake_key: u64, outputs: &[TxOutput]) -> Vec<(u64, Option<u64>)> {
-    let change_addresses: Vec<_> = outputs
-        .iter()
-        .filter_map(|output| output.address)
-        .filter(|addr| addr.1.is_some() && addr.1.unwrap() == stake_key)
-        .collect();
-
-    change_addresses
-}
-
-fn get_non_change_outputs(
-    outputs: &[TxOutput],
-    change_addresses: &[(u64, Option<u64>)],
-) -> Vec<UTxOBuilder> {
-    let non_changes: Vec<_> = outputs
-        .iter()
-        .filter(|output| {
-            output.address.is_none() || !change_addresses.contains(&output.address.unwrap())
-        })
-        .cloned()
-        .collect();
-
-    outputs_to_builders(non_changes)
-}
-
-fn outputs_to_builders(outputs: Vec<TxOutput>) -> Vec<UTxOBuilder> {
-    outputs
-        .into_iter()
-        .map(|output| {
-            UTxOBuilder::new(
-                output
-                    .address
-                    .map(address_from_pair)
-                    .unwrap_or_else(|| Address::new("byron".to_string())),
-                output.value.clone(),
-                output
-                    .assets
-                    .iter()
-                    .map(|asset| TransactionAsset::from(asset.clone()))
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<Vec<_>>()
-}
-
-fn choose_change_address(
-    stake_key: u64,
-    from: &[TxOutput],
-    change_addresses: &[(u64, Option<u64>)],
-) -> (u64, Option<u64>) {
-    let first_from_with_stake_key = from
-        .iter()
-        // we always must find it
-        .find(|from| from.address.is_some() && from.address.unwrap().1 == Some(stake_key))
-        .unwrap()
-        .address
-        .unwrap();
-    change_addresses
-        .first()
-        .cloned()
-        .unwrap_or(first_from_with_stake_key)
 }

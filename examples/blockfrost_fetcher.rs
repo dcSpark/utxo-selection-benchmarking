@@ -122,7 +122,7 @@ async fn _main() -> anyhow::Result<()> {
 }
 
 fn url(endpoint: &String, api: impl fmt::Display) -> String {
-    format!("{endpoint}/{api}", endpoint = endpoint, api = api)
+    format!("{endpoint}/{api}")
 }
 
 async fn get_txs(

@@ -12,7 +12,6 @@ payment_creds_mapping: payment_credentials.mapping
 staking_creds_mapping: staking_credentials.mapping
 policy_mapping: policy_id.mapping
 asset_name_mapping: asset_name.mapping
-address_to_mapping: address_to_mappings.mapping
 
 banned_addresses: banned_addresses.txt
 unparsed_transactions: unparsed_transactions.txt

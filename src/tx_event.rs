@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::str::FromStr;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TxAsset {
     #[serde(rename = "aid")]
     pub asset_id: (u64, u64),
@@ -38,7 +38,6 @@ pub fn pair_from_address(address: Address) -> Option<(u64, Option<u64>)> {
     }
     let split = address
         .split('_')
-        .into_iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
     let payment = match split
@@ -61,7 +60,7 @@ pub fn pair_from_address(address: Address) -> Option<(u64, Option<u64>)> {
     Some((payment, staking))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TxOutput {
     #[serde(rename = "addr")]
     pub address: Option<(u64, Option<u64>)>,
@@ -88,9 +87,9 @@ impl TxOutput {
 #[serde(deny_unknown_fields)]
 pub enum TxEvent {
     Full {
+        from: Vec<TxOutput>,
         to: Vec<TxOutput>,
         fee: dcspark_core::Value<Regulated>,
-        from: Vec<TxOutput>,
     },
     Partial {
         to: Vec<TxOutput>,
@@ -108,10 +107,10 @@ mod tests {
         for addr in addresses {
             let one = address_from_pair(addr);
             let two = pair_from_address(one).unwrap();
-            assert_eq!(addr.0, two.0, "{:?}", addr);
-            assert_eq!(addr.1.is_none(), two.1.is_none(), "{:?}", addr);
+            assert_eq!(addr.0, two.0, "{addr:?}");
+            assert_eq!(addr.1.is_none(), two.1.is_none(), "{addr:?}");
             if let Some(stake) = addr.1 {
-                assert_eq!(stake, two.1.unwrap(), "{:?}", addr);
+                assert_eq!(stake, two.1.unwrap(), "{addr:?}");
             }
         }
 
