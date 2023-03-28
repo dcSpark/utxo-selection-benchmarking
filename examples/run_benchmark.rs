@@ -3,27 +3,18 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 use clap::Parser;
-use serde::Deserialize;
 
 use dcspark_core::network_id::NetworkInfo;
+use dcspark_core::UTxOStore;
 use std::fs::File;
 
 use tracing_subscriber::prelude::*;
 use utxo_selection::algorithms::ThermostatAlgoConfig;
-use utxo_selection::estimators::ThermostatFeeEstimator;
-use utxo_selection_benchmark::bench::run_algorithm_benchmark;
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    events_path: PathBuf,
-    output_insolvent: PathBuf,
-    output_discarded: PathBuf,
-    output_balance: PathBuf,
-    output_balance_short: PathBuf,
-    #[serde(default)]
-    utxos_path: Option<PathBuf>,
-}
+use utxo_selection::estimators::ThermostatFeeEstimator;
+use utxo_selection_benchmark::bench::{run_algorithm_benchmark, PathsConfig};
+use utxo_selection_benchmark::bench_utils::address_mapper::StringAddressMapper;
+use utxo_selection_benchmark::bench_utils::selection_eligibility::SelectionEligibility;
 
 #[derive(Parser, Debug)]
 #[clap(version)]
@@ -54,27 +45,19 @@ async fn _main() -> anyhow::Result<()> {
             path = config_path.display()
         )
     })?;
-    let config: Config = serde_yaml::from_reader(file).with_context(|| {
+    let config: PathsConfig = serde_yaml::from_reader(file).with_context(|| {
         format!(
             "Cannot read config file {path}",
             path = config_path.display()
         )
     })?;
 
-    let io_selection_algo =
-        utxo_selection::algorithms::Thermostat::new(ThermostatAlgoConfig::default());
-
-    let change_balance_algo =
-        utxo_selection::algorithms::Thermostat::new(ThermostatAlgoConfig::default());
-
-    run_algorithm_benchmark(
-        io_selection_algo,
-        change_balance_algo,
-        || {
-            Ok(ThermostatFeeEstimator::new(
-                NetworkInfo::Mainnet,
-                &serde_json::from_str(
-                    "
+    let thermostat = utxo_selection::algorithms::Thermostat::new(ThermostatAlgoConfig::default());
+    let thermostat_fee_estimator = || {
+        Ok(ThermostatFeeEstimator::new(
+            NetworkInfo::Mainnet,
+            &serde_json::from_str(
+                "
                 {
                     \"quorum\": 3,
                     \"keys\": [
@@ -85,16 +68,25 @@ async fn _main() -> anyhow::Result<()> {
                         \"11a39984271cc3f0714f241e2e6df15e8abf2974f3772ffbeefb7a36\"
                     ]
                 }",
-                )?,
-            ))
-        },
-        config.events_path,
-        config.output_insolvent,
-        config.output_discarded,
-        config.output_balance,
-        config.output_balance_short,
+            )?,
+        ))
+    };
+
+    let _largest_first = utxo_selection::algorithms::LargestFirst::try_from(UTxOStore::new())?;
+
+    let single_change = utxo_selection::algorithms::SingleOutputChangeBalancer::default();
+
+    let mut selection = SelectionEligibility::default();
+    selection.set_staking_keys_of_interest(vec![9999999]);
+
+    run_algorithm_benchmark(
+        thermostat,
+        single_change,
+        thermostat_fee_estimator,
+        StringAddressMapper::default(),
+        selection,
+        config,
         false,
-        config.utxos_path,
     )?;
     Ok(())
 }

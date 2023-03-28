@@ -11,26 +11,31 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 #[derive(Default, Debug)]
-pub struct DataMapper<T: Hash + Eq + Serialize + DeserializeOwned> {
+pub struct DataMapper<T: Hash + Eq + Serialize + DeserializeOwned + Clone> {
     mapping: HashMap<T, u64>,
+    invert_mapping: HashMap<u64, T>,
     current_mapping_index: u64,
 }
 
-impl<T: Hash + Eq + Serialize + DeserializeOwned> DataMapper<T> {
+impl<T: Hash + Eq + Serialize + DeserializeOwned + Clone> DataMapper<T> {
     pub fn new() -> Self {
         Self {
             mapping: HashMap::default(),
+            invert_mapping: HashMap::default(),
             current_mapping_index: 0,
         }
     }
 
     pub fn add_if_not_presented(&mut self, key: T) -> u64 {
-        match self.mapping.entry(key) {
+        match self.mapping.entry(key.clone()) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
                 let value = self.current_mapping_index;
                 entry.insert(value);
                 self.current_mapping_index += 1;
+
+                self.invert_mapping.insert(value, key);
+
                 value
             }
         }
@@ -38,6 +43,10 @@ impl<T: Hash + Eq + Serialize + DeserializeOwned> DataMapper<T> {
 
     pub fn get(&self, key: &T) -> Option<u64> {
         self.mapping.get(key).cloned()
+    }
+
+    pub fn get_by_index(&self, key: u64) -> Option<&T> {
+        self.invert_mapping.get(&key)
     }
 
     pub fn dump_to_file(&self, path: PathBuf) -> anyhow::Result<()> {
@@ -80,7 +89,8 @@ impl<T: Hash + Eq + Serialize + DeserializeOwned> DataMapper<T> {
                 return Err(anyhow!("Can't parse {} line: index corrupted", num + 2));
             };
 
-            result.mapping.insert(data, index);
+            result.mapping.insert(data.clone(), index);
+            result.invert_mapping.insert(index, data);
 
             max_index = max(max_index, index);
             read += 1;

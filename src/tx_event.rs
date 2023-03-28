@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::str::FromStr;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TxAsset {
     #[serde(rename = "aid")]
     pub asset_id: (u64, u64),
@@ -60,7 +60,7 @@ pub fn pair_from_address(address: Address) -> Option<(u64, Option<u64>)> {
     Some((payment, staking))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TxOutput {
     #[serde(rename = "addr")]
     pub address: Option<(u64, Option<u64>)>,
@@ -87,9 +87,9 @@ impl TxOutput {
 #[serde(deny_unknown_fields)]
 pub enum TxEvent {
     Full {
+        from: Vec<TxOutput>,
         to: Vec<TxOutput>,
         fee: dcspark_core::Value<Regulated>,
-        from: Vec<TxOutput>,
     },
     Partial {
         to: Vec<TxOutput>,
