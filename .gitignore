@@ -12,3 +12,10 @@ Cargo.lock
 
 # Mac files
 **/.DS_STore
+
+# Events
+*.ev
+*.mapping
+bench_result*
+my_events
+events/milkomeda_events
