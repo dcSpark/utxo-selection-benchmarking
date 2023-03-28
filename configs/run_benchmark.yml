@@ -5,22 +5,23 @@ paths:
   output_balance: "bench_result/balances.txt"
   output_balance_short: "bench_result/short_stats.txt"
   utxos_path: "bench_result/final_utxos.txt"
-
+  utxos_balance_path: "bench_result/utxo_count.csv"
+  balance_points_path: "bench_result/ada_balance.csv"
 algo:
-  type: largest_first
-#  type: thermostat
+#  type: largest_first
+  type: thermostat
 
 change_balance_algo:
   type: single_change
 
-#fee_estimator:
-#  type: thermostat
-#  network: mainnet
-#  plan_path: "events/milkomeda_events/multisig.script"
 fee_estimator:
-  type: cml_estimator
-  magic: "mainnet.cardano-evm.c1"
+  type: thermostat
+  network: mainnet
   plan_path: "events/milkomeda_events/multisig.script"
+#fee_estimator:
+#  type: cml_estimator
+#  magic: "mainnet.cardano-evm.c1"
+#  plan_path: "events/milkomeda_events/multisig.script"
 
 mapper:
   type: cml_mapper
@@ -32,4 +33,4 @@ mapper:
   default_address: "addr1qx2kd28nq8ac5prwg32hhvudlwggpgfp8utlyqxu6wqgz62f79qsdmm5dsknt9ecr5w468r9ey0fxwkdrwh08ly3tu9sy0f4qd"
 
 keys_of_interest: [9999999]
-allow_balance_change: true
+allow_balance_change: false

@@ -11,8 +11,8 @@ use cardano_multiplatform_lib::ledger::common::value::BigNum;
 use cardano_multiplatform_lib::metadata::{
     AuxiliaryData, GeneralTransactionMetadata, TransactionMetadatum,
 };
-use cardano_multiplatform_lib::plutus::ExUnitPrices;
-use cardano_multiplatform_lib::UnitInterval;
+use cardano_multiplatform_lib::plutus::{ExUnitPrices, PlutusData};
+use cardano_multiplatform_lib::{RequiredSigners, UnitInterval};
 use dcspark_core::multisig_plan::MultisigPlan;
 use dcspark_core::network_id::NetworkInfo;
 use dcspark_core::tx::{CardanoPaymentCredentials, UTxOBuilder, UTxODetails};
@@ -62,14 +62,30 @@ pub enum BalanceChangeAlgoConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
+pub enum CardanoCmlEstimatorConfig {
+    PlutusScript {
+        // TODO: enable plutus script support
+        // partial_witness: PartialPlutusWitness,
+        required_signers: RequiredSigners,
+        datum: PlutusData,
+    },
+    PaymentKey,
+    NativeScript {
+        plan: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum FeeEstimatorConfig {
     Thermostat {
         network: NetworkInfo,
         plan_path: PathBuf,
     },
     CmlEstimator {
-        plan_path: PathBuf,
-        magic: String,
+        config: CardanoCmlEstimatorConfig,
+        magic: Option<String>,
     },
 }
 
@@ -181,9 +197,23 @@ pub fn parse_estimator_creator<
                 Ok(ThermostatFeeEstimator::new(network.clone(), &plan))
             })
         }
-        FeeEstimatorConfig::CmlEstimator { plan_path, magic } => {
-            let plan = MultisigPlan::load(plan_path)?;
+        FeeEstimatorConfig::CmlEstimator { config, magic } => {
+            let credentials = match config {
+                CardanoCmlEstimatorConfig::PlutusScript { .. } => {
+                    todo!("not implemented")
+                }
+                CardanoCmlEstimatorConfig::PaymentKey => CardanoPaymentCredentials::PaymentKey,
+                CardanoCmlEstimatorConfig::NativeScript { plan } => {
+                    let plan = MultisigPlan::load(plan)?;
+                    CardanoPaymentCredentials::NativeScript {
+                        native_script: plan.to_script().get(0),
+                        witness_info: NativeScriptWitnessInfo::num_signatures(plan.quorum as usize),
+                    }
+                }
+            };
+
             parse_mapper(main_config, algo, change_algo, || {
+                // TODO: make this configurable
                 let coefficient = BigNum::from_str("44").unwrap();
                 let constant = BigNum::from_str("155381").unwrap();
                 let linear_fee = LinearFee::new(&coefficient, &constant);
@@ -192,6 +222,7 @@ pub fn parse_estimator_creator<
                 let max_value_size = 5000;
                 let max_tx_size = 16384;
                 let coins_per_utxo_byte = BigNum::from_str("4310").unwrap();
+
                 let mut builder =
                     cardano_multiplatform_lib::builders::tx_builder::TransactionBuilder::new(
                         &TransactionBuilderConfigBuilder::new()
@@ -210,30 +241,26 @@ pub fn parse_estimator_creator<
                             .build()
                             .map_err(|err| anyhow!("can't build tx builder: {}", err))?,
                     );
-                // for the unwrap method we still set the metadata 87 to mark who is the
-                // source of the
-                let auxiliary_data = {
-                    let mut auxiliary_data = AuxiliaryData::new();
-                    let mut metadata = GeneralTransactionMetadata::new();
-                    metadata.insert(
-                        &BigNum::from_str("87").expect("87 should read as a bignum"),
-                        &TransactionMetadatum::new_text(magic.clone()).map_err(|error| {
-                            anyhow::anyhow!("Failed to encode the magic metadata: {}", error)
-                        })?,
-                    );
-                    auxiliary_data.set_metadata(&metadata);
-                    auxiliary_data
-                };
-                builder.set_auxiliary_data(&auxiliary_data);
 
-                CmlFeeEstimator::new(
-                    builder,
-                    CardanoPaymentCredentials::NativeScript {
-                        native_script: plan.to_script().get(0),
-                        witness_info: NativeScriptWitnessInfo::num_signatures(plan.quorum as usize),
-                    },
-                    true,
-                )
+                if let Some(magic) = &magic {
+                    // for the unwrap method we still set the metadata 87 to mark who is the
+                    // source of the
+                    let auxiliary_data = {
+                        let mut auxiliary_data = AuxiliaryData::new();
+                        let mut metadata = GeneralTransactionMetadata::new();
+                        metadata.insert(
+                            &BigNum::from_str("87").expect("87 should read as a bignum"),
+                            &TransactionMetadatum::new_text(magic.clone()).map_err(|error| {
+                                anyhow::anyhow!("Failed to encode the magic metadata: {}", error)
+                            })?,
+                        );
+                        auxiliary_data.set_metadata(&metadata);
+                        auxiliary_data
+                    };
+                    builder.set_auxiliary_data(&auxiliary_data);
+                }
+
+                CmlFeeEstimator::new(builder, credentials.clone(), true)
             })
         }
     }

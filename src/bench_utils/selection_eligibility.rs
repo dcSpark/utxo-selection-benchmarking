@@ -33,6 +33,14 @@ impl SelectionEligibility {
         self.staking_keys_of_interest.contains(&staking_key) || self.allow_all_stake_keys
     }
 
+    pub fn get_whitelisted_non_banned(&self) -> Vec<u64> {
+        self.staking_keys_of_interest
+            .iter()
+            .filter(|key| !self.is_banned(**key))
+            .cloned()
+            .collect()
+    }
+
     /* we don't take txs:
      * - with byron inputs
      * - with more than one staking key in inputs

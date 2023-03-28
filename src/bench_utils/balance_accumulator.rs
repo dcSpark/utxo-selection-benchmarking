@@ -23,6 +23,21 @@ impl BalanceAccumulator {
         }
     }
 
+    pub fn get_balance(&self, stake_key: u64, token: TokenId) -> Balance<Regulated> {
+        self.balance_by_stake_key
+            .get(&stake_key)
+            .and_then(|map| map.get(&token))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn get_fee(&self, stake_key: u64) -> Value<Regulated> {
+        self.fee_by_stake_key
+            .get(&stake_key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn reduce_balance_from<DataMapper: CardanoDataMapper>(
         &mut self,
         from: &[TxOutput],

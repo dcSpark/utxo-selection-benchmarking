@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::tx_event::{TxEvent, TxOutput};
 
 use dcspark_core::tx::{UTxOBuilder, UTxODetails};
-use dcspark_core::{Balance, Regulated};
+use dcspark_core::{Balance, Regulated, TokenId};
 
 use crate::bench_utils::address_mapper::CardanoDataMapper;
 use crate::bench_utils::balance_accumulator::BalanceAccumulator;
@@ -18,7 +18,10 @@ use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::rc::Rc;
+use std::str::FromStr;
 
+use crate::bench_utils::stats_accumulator::{BalanceStats, StatsAccumulator};
+use crate::utils::balance_to_i64;
 use utxo_selection::{
     InputOutputSetup, InputSelectionAlgorithm, TransactionFeeEstimator, UTxOStoreSupport,
 };
@@ -36,6 +39,12 @@ pub struct PathsConfig {
 
     #[serde(default)]
     utxos_path: Option<PathBuf>,
+
+    #[serde(default)]
+    utxos_balance_path: Option<PathBuf>,
+
+    #[serde(default)]
+    balance_points_path: Option<PathBuf>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -64,9 +73,34 @@ where
 
     let mut utxo_accumulator = UTxOStoreAccumulator::new(selection_eligibility_criteria.clone());
 
-    let input_events = BufReader::new(File::open(paths.events_path)?);
+    let input_events = BufReader::new(File::open(paths.events_path.clone())?);
+
+    let mut balance_points_acc = StatsAccumulator::<BalanceStats>::default();
+    let mut utxo_count_acc = StatsAccumulator::<u64>::default();
+    let mut read: u64 = 0;
 
     for (tx_number, event_str) in input_events.lines().enumerate() {
+        read += 1;
+
+        for stake_key in selection_eligibility_criteria
+            .clone()
+            .as_ref()
+            .borrow()
+            .get_whitelisted_non_banned()
+            .iter()
+        {
+            collect_stats(
+                stake_key,
+                tx_number as u64,
+                &paths,
+                &actual_balance_acc,
+                &computed_balance_acc,
+                &utxo_accumulator,
+                &mut balance_points_acc,
+                &mut utxo_count_acc,
+            );
+        }
+
         let event: TxEvent = serde_json::from_str(&event_str?)?;
         match event {
             TxEvent::Full {
@@ -325,6 +359,24 @@ where
         }
     }
 
+    for stake_key in selection_eligibility_criteria
+        .as_ref()
+        .borrow()
+        .get_whitelisted_non_banned()
+        .iter()
+    {
+        collect_stats(
+            stake_key,
+            read,
+            &paths,
+            &actual_balance_acc,
+            &computed_balance_acc,
+            &utxo_accumulator,
+            &mut balance_points_acc,
+            &mut utxo_count_acc,
+        );
+    }
+
     tracing::info!(
         "Total converged addresses: {:?}",
         computed_balance_acc.len()
@@ -362,7 +414,63 @@ where
         utxo_accumulator.print_utxos(path)?;
     }
 
+    if let Some(path) = paths.balance_points_path {
+        balance_points_acc.dump_stats(
+            path,
+            "ada_computed,ada_actual,fee_computed,fee_actual".to_string(),
+        )?;
+    }
+
+    if let Some(path) = paths.utxos_balance_path {
+        utxo_count_acc.dump_stats(path, "utxo_count".to_string())?;
+    }
+
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_stats(
+    stake_key: &u64,
+    tx_number: u64,
+    paths: &PathsConfig,
+    actual_balance_acc: &BalanceAccumulator,
+    computed_balance_acc: &BalanceAccumulator,
+    utxo_accumulator: &UTxOStoreAccumulator,
+    balance_points_acc: &mut StatsAccumulator<BalanceStats>,
+    utxo_count_acc: &mut StatsAccumulator<u64>,
+) {
+    if paths.balance_points_path.is_some() {
+        balance_points_acc.add_stats(
+            *stake_key,
+            tx_number,
+            BalanceStats {
+                ada_computed: balance_to_i64(
+                    computed_balance_acc.get_balance(*stake_key, TokenId::MAIN),
+                ),
+                ada_actual: balance_to_i64(
+                    actual_balance_acc.get_balance(*stake_key, TokenId::MAIN),
+                ),
+                fee_computed: i64::from_str(
+                    computed_balance_acc
+                        .get_fee(*stake_key)
+                        .to_string()
+                        .as_str(),
+                )
+                .unwrap(),
+                fee_actual: i64::from_str(
+                    actual_balance_acc.get_fee(*stake_key).to_string().as_str(),
+                )
+                .unwrap(),
+            },
+        );
+    }
+    if paths.utxos_balance_path.is_some() {
+        utxo_count_acc.add_stats(
+            *stake_key,
+            tx_number,
+            utxo_accumulator.get_available_inputs(*stake_key).len() as u64,
+        );
+    }
 }
 
 fn remove_inputs_from_consideration(
