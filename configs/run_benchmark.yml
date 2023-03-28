@@ -1,6 +1,35 @@
-events_path: "cleaned_events_finalised.ev"
-output_insolvent: "bench_result/insolvent_addresses.txt"
-output_discarded: "bench_result/discarded_addresses.txt"
-output_balance: "bench_result/balances.txt"
-output_balance_short: "bench_result/short_stats.txt"
-utxos_path: "bench_result/final_utxos.txt"
+paths:
+  events_path: "events/milkomeda_events/milkomeda_30k.ev"
+  output_insolvent: "bench_result/insolvent_addresses.txt"
+  output_discarded: "bench_result/discarded_addresses.txt"
+  output_balance: "bench_result/balances.txt"
+  output_balance_short: "bench_result/short_stats.txt"
+  utxos_path: "bench_result/final_utxos.txt"
+
+algo:
+  type: largest_first
+#  type: thermostat
+
+change_balance_algo:
+  type: single_change
+
+#fee_estimator:
+#  type: thermostat
+#  network: mainnet
+#  plan_path: "events/milkomeda_events/multisig.script"
+fee_estimator:
+  type: cml_estimator
+  magic: "mainnet.cardano-evm.c1"
+  plan_path: "events/milkomeda_events/multisig.script"
+
+mapper:
+  type: cml_mapper
+  payment_key_path: "events/milkomeda_events/payment_credentials.mapping"
+  staking_key_path: "events/milkomeda_events/staking_credentials.mapping"
+  policy_id_path: "events/milkomeda_events/policy_id.mapping"
+  asset_name_path: "events/milkomeda_events/asset_name.mapping"
+  network: 1
+  default_address: "addr1qx2kd28nq8ac5prwg32hhvudlwggpgfp8utlyqxu6wqgz62f79qsdmm5dsknt9ecr5w468r9ey0fxwkdrwh08ly3tu9sy0f4qd"
+
+keys_of_interest: [9999999]
+allow_balance_change: true

@@ -7,8 +7,8 @@ edition = "2021"
 
 [dependencies]
 entity = { git = "https://github.com/dcSpark/carp.git", rev = "75bf44f6aad4fb53afdaab39956e66c2b3a09922" }
-dcspark-core = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "b8d504faf018e0e3a9b8b9b00aa568d28e82ed06" }
-utxo-selection = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "b8d504faf018e0e3a9b8b9b00aa568d28e82ed06" }
+dcspark-core = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "d93afa1f4cef477dec913b3e366898d6a683e19d" }
+utxo-selection = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "d93afa1f4cef477dec913b3e366898d6a683e19d" }
 
 anyhow = "1.0.53"
 itertools = "0.10.5"
