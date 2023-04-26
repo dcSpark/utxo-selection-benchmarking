@@ -211,26 +211,42 @@ pub fn parse_estimator_creator<
     change_algo: ChangeAlgo,
 ) -> anyhow::Result<()> {
     match main_config.fee_estimator.clone() {
-        FeeEstimatorConfig::Thermostat { network, plan_path, coins_per_utxo_byte } => {
+        FeeEstimatorConfig::Thermostat {
+            network,
+            plan_path,
+            coins_per_utxo_byte,
+        } => {
             let plan = MultisigPlan::load(plan_path)?;
             parse_mapper(main_config, algo, change_algo, || {
-                Ok(ThermostatFeeEstimator::new(network.clone(), &plan, coins_per_utxo_byte))
+                Ok(ThermostatFeeEstimator::new(
+                    network.clone(),
+                    &plan,
+                    coins_per_utxo_byte,
+                ))
             })
         }
-        FeeEstimatorConfig::CmlEstimator { config, parameters, magic } => {
+        FeeEstimatorConfig::CmlEstimator {
+            config,
+            parameters,
+            magic,
+        } => {
             let (credentials, require_calculation) = match config {
                 CardanoCmlEstimatorConfig::PlutusScript { .. } => {
                     todo!("not implemented")
                 }
-                CardanoCmlEstimatorConfig::PaymentKey => (CardanoPaymentCredentials::PaymentKey, false),
+                CardanoCmlEstimatorConfig::PaymentKey => {
+                    (CardanoPaymentCredentials::PaymentKey, false)
+                }
                 CardanoCmlEstimatorConfig::NativeScript { plan } => {
                     let plan = MultisigPlan::load(plan)?;
                     (
                         CardanoPaymentCredentials::NativeScript {
                             native_script: plan.to_script().get(0),
-                            witness_info: NativeScriptWitnessInfo::num_signatures(plan.quorum as usize),
+                            witness_info: NativeScriptWitnessInfo::num_signatures(
+                                plan.quorum as usize,
+                            ),
                         },
-                        false
+                        false,
                     )
                 }
             };
@@ -248,8 +264,14 @@ pub fn parse_estimator_creator<
                             .max_tx_size(parameters.max_tx_size)
                             .coins_per_utxo_byte(&parameters.coins_per_utxo_byte)
                             .ex_unit_prices(&ExUnitPrices::new(
-                                &UnitInterval::new(&parameters.ex_unit_mem_price_numerator, &parameters.ex_unit_mem_price_denominator),
-                                &UnitInterval::new(&parameters.ex_unit_step_price_numerator, &parameters.ex_unit_step_price_denominator),
+                                &UnitInterval::new(
+                                    &parameters.ex_unit_mem_price_numerator,
+                                    &parameters.ex_unit_mem_price_denominator,
+                                ),
+                                &UnitInterval::new(
+                                    &parameters.ex_unit_step_price_numerator,
+                                    &parameters.ex_unit_step_price_denominator,
+                                ),
                             ))
                             .collateral_percentage(parameters.collateral_percentage)
                             .max_collateral_inputs(parameters.max_collateral_inputs)
@@ -275,7 +297,12 @@ pub fn parse_estimator_creator<
                     builder.set_auxiliary_data(&auxiliary_data);
                 }
 
-                CmlFeeEstimator::new(builder, credentials.clone(), require_calculation, parameters.coins_per_utxo_byte)
+                CmlFeeEstimator::new(
+                    builder,
+                    credentials.clone(),
+                    require_calculation,
+                    parameters.coins_per_utxo_byte,
+                )
             })
         }
     }
