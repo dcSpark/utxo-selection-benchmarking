@@ -82,11 +82,31 @@ pub enum FeeEstimatorConfig {
     Thermostat {
         network: NetworkInfo,
         plan_path: PathBuf,
+        coins_per_utxo_byte: BigNum,
     },
     CmlEstimator {
         config: CardanoCmlEstimatorConfig,
+        parameters: CardanoNetworkParameters,
         magic: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardanoNetworkParameters {
+    coefficient: BigNum,
+    constant: BigNum,
+    pool_deposit: BigNum,
+    key_deposit: BigNum,
+    max_value_size: u32,
+    max_tx_size: u32,
+    coins_per_utxo_byte: BigNum,
+    ex_unit_mem_price_numerator: BigNum,
+    ex_unit_mem_price_denominator: BigNum,
+    ex_unit_step_price_numerator: BigNum,
+    ex_unit_step_price_denominator: BigNum,
+    collateral_percentage: u32,
+    max_collateral_inputs: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -191,53 +211,70 @@ pub fn parse_estimator_creator<
     change_algo: ChangeAlgo,
 ) -> anyhow::Result<()> {
     match main_config.fee_estimator.clone() {
-        FeeEstimatorConfig::Thermostat { network, plan_path } => {
+        FeeEstimatorConfig::Thermostat {
+            network,
+            plan_path,
+            coins_per_utxo_byte,
+        } => {
             let plan = MultisigPlan::load(plan_path)?;
             parse_mapper(main_config, algo, change_algo, || {
-                Ok(ThermostatFeeEstimator::new(network.clone(), &plan))
+                Ok(ThermostatFeeEstimator::new(
+                    network.clone(),
+                    &plan,
+                    coins_per_utxo_byte,
+                ))
             })
         }
-        FeeEstimatorConfig::CmlEstimator { config, magic } => {
-            let credentials = match config {
+        FeeEstimatorConfig::CmlEstimator {
+            config,
+            parameters,
+            magic,
+        } => {
+            let (credentials, require_calculation) = match config {
                 CardanoCmlEstimatorConfig::PlutusScript { .. } => {
                     todo!("not implemented")
                 }
-                CardanoCmlEstimatorConfig::PaymentKey => CardanoPaymentCredentials::PaymentKey,
+                CardanoCmlEstimatorConfig::PaymentKey => {
+                    (CardanoPaymentCredentials::PaymentKey, false)
+                }
                 CardanoCmlEstimatorConfig::NativeScript { plan } => {
                     let plan = MultisigPlan::load(plan)?;
-                    CardanoPaymentCredentials::NativeScript {
-                        native_script: plan.to_script().get(0),
-                        witness_info: NativeScriptWitnessInfo::num_signatures(plan.quorum as usize),
-                    }
+                    (
+                        CardanoPaymentCredentials::NativeScript {
+                            native_script: plan.to_script().get(0),
+                            witness_info: NativeScriptWitnessInfo::num_signatures(
+                                plan.quorum as usize,
+                            ),
+                        },
+                        false,
+                    )
                 }
             };
 
             parse_mapper(main_config, algo, change_algo, || {
-                // TODO: make this configurable
-                let coefficient = BigNum::from_str("44").unwrap();
-                let constant = BigNum::from_str("155381").unwrap();
-                let linear_fee = LinearFee::new(&coefficient, &constant);
-                let pool_deposit = BigNum::from_str("500000000").unwrap();
-                let key_deposit = BigNum::from_str("2000000").unwrap();
-                let max_value_size = 5000;
-                let max_tx_size = 16384;
-                let coins_per_utxo_byte = BigNum::from_str("4310").unwrap();
+                let linear_fee = LinearFee::new(&parameters.coefficient, &parameters.constant);
 
                 let mut builder =
                     cardano_multiplatform_lib::builders::tx_builder::TransactionBuilder::new(
                         &TransactionBuilderConfigBuilder::new()
                             .fee_algo(&linear_fee)
-                            .pool_deposit(&pool_deposit)
-                            .key_deposit(&key_deposit)
-                            .max_value_size(max_value_size)
-                            .max_tx_size(max_tx_size)
-                            .coins_per_utxo_byte(&coins_per_utxo_byte)
+                            .pool_deposit(&parameters.pool_deposit)
+                            .key_deposit(&parameters.key_deposit)
+                            .max_value_size(parameters.max_value_size)
+                            .max_tx_size(parameters.max_tx_size)
+                            .coins_per_utxo_byte(&parameters.coins_per_utxo_byte)
                             .ex_unit_prices(&ExUnitPrices::new(
-                                &UnitInterval::new(&BigNum::zero(), &BigNum::zero()),
-                                &UnitInterval::new(&BigNum::zero(), &BigNum::zero()),
+                                &UnitInterval::new(
+                                    &parameters.ex_unit_mem_price_numerator,
+                                    &parameters.ex_unit_mem_price_denominator,
+                                ),
+                                &UnitInterval::new(
+                                    &parameters.ex_unit_step_price_numerator,
+                                    &parameters.ex_unit_step_price_denominator,
+                                ),
                             ))
-                            .collateral_percentage(0)
-                            .max_collateral_inputs(0)
+                            .collateral_percentage(parameters.collateral_percentage)
+                            .max_collateral_inputs(parameters.max_collateral_inputs)
                             .build()
                             .map_err(|err| anyhow!("can't build tx builder: {}", err))?,
                     );
@@ -260,7 +297,12 @@ pub fn parse_estimator_creator<
                     builder.set_auxiliary_data(&auxiliary_data);
                 }
 
-                CmlFeeEstimator::new(builder, credentials.clone(), true)
+                CmlFeeEstimator::new(
+                    builder,
+                    credentials.clone(),
+                    require_calculation,
+                    parameters.coins_per_utxo_byte,
+                )
             })
         }
     }

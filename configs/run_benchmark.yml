@@ -18,10 +18,28 @@ fee_estimator:
   type: thermostat
   network: mainnet
   plan_path: "events/milkomeda_events/multisig.script"
+  coins_per_utxo_byte: "4310"
+
 #fee_estimator:
 #  type: cml_estimator
 #  magic: "mainnet.cardano-evm.c1"
-#  plan_path: "events/milkomeda_events/multisig.script"
+#  config:
+#    type: native_script
+#    plan: "events/milkomeda_events/multisig.script"
+#  parameters:
+#    coefficient: "44"
+#    constant: "155381"
+#    pool_deposit: "500000000"
+#    key_deposit: "2000000"
+#    max_value_size: 5000
+#    max_tx_size: 16384
+#    coins_per_utxo_byte: "4310"
+#    ex_unit_mem_price_numerator: "577"
+#    ex_unit_mem_price_denominator: "10000"
+#    ex_unit_step_price_numerator: "721"
+#    ex_unit_step_price_denominator: "10000000"
+#    collateral_percentage: 150
+#    max_collateral_inputs: 3
 
 mapper:
   type: cml_mapper
