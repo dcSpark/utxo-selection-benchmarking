@@ -11,7 +11,7 @@ dcspark-core = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "33d
 utxo-selection = { git = "https://github.com/dcSpark/dcspark-core.git", rev = "33d9c950d0f1a3abe4e08f3fafee60b1317877a6" }
 
 anyhow = "1.0.53"
-itertools = "0.10.5"
+itertools = "0.11.0"
 serde = {version = "1.0.144", features = ["derive", "rc"]}
 tokio = { version = "1.16.1", features = ["full"] }
 hex = "0.4.3"
